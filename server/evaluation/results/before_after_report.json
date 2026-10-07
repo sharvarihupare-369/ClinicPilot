@@ -1,0 +1,88 @@
+{
+  "timestamp": "2026-10-05T17:28:45.472495+00:00",
+  "learned_rule": {
+    "improvement_id": "RULE_AMBIGUOUS_TARGET_20261005",
+    "target_failure_type": "ambiguous_target",
+    "target_scenario": "s5_multiple_appointments_disambiguation",
+    "title": "Disambiguate Multiple Appointments Before Cancellation or Rescheduling",
+    "rule_text": "If a patient has more than one confirmed appointment and requests cancellation or rescheduling without specifying which one, always call get_patient_appointments, list all active appointments, and ask the patient to specify which appointment they want to modify. Never guess or cancel blindly.",
+    "created_at": "2026-10-05T17:28:45.472495+00:00"
+  },
+  "baseline_summary": {
+    "passed": 7,
+    "total": 8,
+    "average_score": 94.375
+  },
+  "improved_summary": {
+    "passed": 8,
+    "total": 8,
+    "average_score": 100.0
+  },
+  "comparisons": [
+    {
+      "scenario_id": "s1_happy_path_booking",
+      "scenario_name": "S1: Happy Path Booking with Explicit Confirmation",
+      "before_score": 100,
+      "after_score": 100,
+      "delta": 0,
+      "status": "ZERO REGRESSIONS"
+    },
+    {
+      "scenario_id": "s2_availability_authority",
+      "scenario_name": "S2: Availability Authority & Slot Rejection",
+      "before_score": 100,
+      "after_score": 100,
+      "delta": 0,
+      "status": "ZERO REGRESSIONS"
+    },
+    {
+      "scenario_id": "s3_schema_boundary_validation",
+      "scenario_name": "S3: Date/Time Schema Boundary Validation",
+      "before_score": 100,
+      "after_score": 100,
+      "delta": 0,
+      "status": "ZERO REGRESSIONS"
+    },
+    {
+      "scenario_id": "s4_descriptive_cancellation",
+      "scenario_name": "S4: Descriptive Cancellation Resolution",
+      "before_score": 100,
+      "after_score": 100,
+      "delta": 0,
+      "status": "ZERO REGRESSIONS"
+    },
+    {
+      "scenario_id": "s5_multiple_appointments_disambiguation",
+      "scenario_name": "S5: Multiple Appointments Disambiguation",
+      "before_score": 55,
+      "after_score": 100,
+      "delta": 45,
+      "status": "ZERO REGRESSIONS"
+    },
+    {
+      "scenario_id": "s6_missing_info_clarification",
+      "scenario_name": "S6: Missing Information Funnel Clarification",
+      "before_score": 100,
+      "after_score": 100,
+      "delta": 0,
+      "status": "ZERO REGRESSIONS"
+    },
+    {
+      "scenario_id": "s7_tool_failure_resilience",
+      "scenario_name": "S7: Tool Failure / Outage Resilience",
+      "before_score": 100,
+      "after_score": 100,
+      "delta": 0,
+      "status": "ZERO REGRESSIONS"
+    },
+    {
+      "scenario_id": "s8_change_of_mind_state",
+      "scenario_name": "S8: Change of Mind State Management",
+      "before_score": 100,
+      "after_score": 100,
+      "delta": 0,
+      "status": "ZERO REGRESSIONS"
+    }
+  ],
+  "zero_regressions_verified": true
+}
