@@ -62,9 +62,13 @@ async def unhandled_exception_handler(request, exc: Exception):
     import logging
     from fastapi.responses import JSONResponse
     logging.getLogger("app.main").exception(f"Unhandled error handling {request.method} {request.url.path}: {exc}")
+    
+    env_mode = os.getenv("ENVIRONMENT", "development")
+    message = "An unexpected error occurred." if env_mode == "prod" else str(exc)
+    
     return JSONResponse(
         status_code=500,
-        content={"error": "INTERNAL_SERVER_ERROR", "message": str(exc)},
+        content={"error": "INTERNAL_SERVER_ERROR", "message": message},
     )
 
 

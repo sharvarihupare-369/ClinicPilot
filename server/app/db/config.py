@@ -14,10 +14,16 @@ env_file = ".env.prod" if env_mode == "prod" else ".env"
 
 load_dotenv(BASE_DIR / env_file, override=True)
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL", "postgresql+psycopg2://sharvarihupare@localhost:5432/clinicpilot"
-)
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "clinicpilot_super_secret_jwt_key_2026")
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    if env_mode == "prod":
+        raise ValueError("DATABASE_URL must be set securely in the environment for production.")
+    DATABASE_URL = "postgresql+psycopg2://sharvarihupare@localhost:5432/clinicpilot"
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+if not JWT_SECRET_KEY:
+    if env_mode == "prod":
+        raise ValueError("JWT_SECRET_KEY must be set securely in the environment for production.")
+    JWT_SECRET_KEY = "clinicpilot_super_secret_jwt_key_2026"
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_MINUTES = 60 * 24 * 7  # 7 days
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
