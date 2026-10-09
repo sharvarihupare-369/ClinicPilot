@@ -19,6 +19,7 @@ def build_engine(db_url: str = DATABASE_URL) -> Engine:
     engine = create_engine(
         db_url,
         connect_args={"check_same_thread": False} if is_sqlite else {},
+        pool_pre_ping=True,
         echo=False,
     )
 

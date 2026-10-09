@@ -8,8 +8,9 @@ def search_doctors(
     service: ClinicService,
     specialty: Optional[str] = None,
     location: Optional[str] = None,
+    doctor_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Search for clinic doctors by specialty and/or city location."""
+    """Search for clinic doctors by specialty, city location, and/or doctor name."""
     try:
         from app.agent.parsers import extract_specialty
         if specialty:
@@ -18,7 +19,7 @@ def search_doctors(
                 specialty = canonical
             else:
                 specialty = specialty.strip()
-        doctors = service.search_doctors(specialty=specialty, location=location)
+        doctors = service.search_doctors(specialty=specialty, location=location, name=doctor_name)
         return {
             "success": True,
             "count": len(doctors),
@@ -36,7 +37,7 @@ def search_doctors(
 
 SEARCH_DOCTORS_DEFINITION = {
     "name": "search_doctors",
-    "description": "Search for doctors in the clinic by medical specialty (e.g. Dermatology, Cardiology) and/or city location (e.g. Pune, Mumbai).",
+    "description": "Search for doctors in the clinic by medical specialty (e.g. Dermatology, Cardiology), city location (e.g. Pune, Mumbai), and/or doctor name (e.g. Mrunal, Rohan Joshi).",
     "parameters": {
         "type": "object",
         "properties": {
@@ -47,6 +48,10 @@ SEARCH_DOCTORS_DEFINITION = {
             "location": {
                 "type": "string",
                 "description": "City or clinic location such as Pune or Mumbai.",
+            },
+            "doctor_name": {
+                "type": "string",
+                "description": "Doctor's name, e.g. Dr. Mrunal, Rohan Joshi, Sharma.",
             },
         },
     },

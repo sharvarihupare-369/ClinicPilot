@@ -1,10 +1,10 @@
 [
   {
-    "improvement_id": "RULE_AMBIGUOUS_TARGET_20261005",
+    "improvement_id": "RULE_AMBIGUOUS_TARGET_20261008",
     "target_failure_type": "ambiguous_target",
     "target_scenario": "s5_multiple_appointments_disambiguation",
     "title": "Disambiguate Multiple Appointments Before Cancellation or Rescheduling",
     "rule_text": "If a patient has more than one confirmed appointment and requests cancellation or rescheduling without specifying which one, always call get_patient_appointments, list all active appointments, and ask the patient to specify which appointment they want to modify. Never guess or cancel blindly.",
-    "created_at": "2026-10-05T17:28:45.472495+00:00"
+    "created_at": "2026-10-08T17:32:46.115680+00:00"
   }
 ]

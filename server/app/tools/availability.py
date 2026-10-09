@@ -9,6 +9,8 @@ def get_available_slots(
     service: ClinicService,
     doctor_id: Union[int, str],
     date: str,
+    current_date: str = None,
+    current_time: str = None,
 ) -> Dict[str, Any]:
     """Retrieve available appointment slots for a specific doctor and date (YYYY-MM-DD)."""
     # Input validation
@@ -35,7 +37,10 @@ def get_available_slots(
 
     try:
         from app.db.config import get_current_datetime
-        cur_date, cur_time = get_current_datetime()
+        if current_date and current_time:
+            cur_date, cur_time = current_date, current_time
+        else:
+            cur_date, cur_time = get_current_datetime()
 
         if date_str < cur_date:
             return {

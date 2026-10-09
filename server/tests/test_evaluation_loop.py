@@ -232,10 +232,10 @@ async def test_improvement_actually_changes_agent_behavior():
     from app.policies import clear_learned_rules, compile_system_prompt
     from evaluation.improvement import ImprovementEngine, FailureAnalysis
 
+    from evaluation.fixtures import reset_eval_db
     # 1. Baseline: Zero learned rules
     clear_learned_rules()
-    reset_db()
-    seed_db()
+    reset_eval_db()
     with SessionLocal() as session:
         session.add_all([
             AppointmentModel(id=201, patient_id="pat_arch_test", doctor_id=1, date="2026-10-10", time="10:00", status="CONFIRMED"),

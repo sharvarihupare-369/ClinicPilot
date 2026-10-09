@@ -29,6 +29,8 @@ def execute_tool(
     tool_name: str,
     arguments: Dict[str, Any],
     service: ClinicService,
+    current_date: str = None,
+    current_time: str = None,
 ) -> Dict[str, Any]:
     """Centralized dispatcher executing agent tools against the domain service."""
     dispatch_map = {
@@ -36,11 +38,14 @@ def execute_tool(
             service=service,
             specialty=args.get("specialty"),
             location=args.get("location"),
+            doctor_name=args.get("doctor_name") or args.get("name"),
         ),
         "get_available_slots": lambda args: get_available_slots(
             service=service,
             doctor_id=args.get("doctor_id", ""),
             date=args.get("date", ""),
+            current_date=current_date,
+            current_time=current_time,
         ),
         "get_patient_appointments": lambda args: get_patient_appointments(
             service=service,
@@ -53,6 +58,8 @@ def execute_tool(
             doctor_id=args.get("doctor_id", ""),
             date=args.get("date", ""),
             time=args.get("time", ""),
+            current_date=current_date,
+            current_time=current_time,
         ),
         "cancel_appointment": lambda args: cancel_appointment(
             service=service,
@@ -65,6 +72,8 @@ def execute_tool(
             appointment_id=args.get("appointment_id", ""),
             new_date=args.get("new_date", ""),
             new_time=args.get("new_time", ""),
+            current_date=current_date,
+            current_time=current_time,
         ),
     }
 

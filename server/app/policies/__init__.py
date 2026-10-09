@@ -1,8 +1,7 @@
-"""Policy loading and system prompt compilation."""
-
+import os
 import json
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 POLICY_DIR = Path(__file__).resolve().parent
 BASE_POLICY_FILE = POLICY_DIR / "base_policy.json"
@@ -45,15 +44,17 @@ def clear_learned_rules() -> None:
         json.dump([], f, indent=2)
 
 
-def compile_system_prompt(current_date: str = "2026-10-05") -> str:
+def compile_system_prompt(current_date: Optional[str] = None) -> str:
     """Dynamically compiles prompt from BASE RULES + LEARNED RULES + TEMPORAL CONTEXT."""
+    from datetime import datetime
+    ref_date = current_date or os.getenv("CURRENT_DATE", "").strip() or datetime.now().strftime("%Y-%m-%d")
     base_rules = load_base_rules()
     learned_rules = load_learned_rules()
 
     prompt_lines = [
         "### CLINICPILOT SCHEDULING AGENT INSTRUCTIONS",
         "",
-        f"**TEMPORAL CONTEXT**: Today's reference date is {current_date}.",
+        f"**TEMPORAL CONTEXT**: Today's reference date is {ref_date}.",
         "Resolve relative dates (e.g. 'today', 'tomorrow') relative to this reference date.",
         "Never guess or invent missing booking parameters (doctor, date, time).",
         "",

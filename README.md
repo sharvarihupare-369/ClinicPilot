@@ -323,12 +323,30 @@ python3 -m evaluation.run_before_after
 
 ---
 
-## 🧪 Running the Test Suite
+All 66 unit and integration tests execute deterministically in under 24 seconds without external network dependencies.
 
-The test suite covers database persistence, domain service failure simulations, tool execution, safety guardrails, date resolution, time normalization, multi-turn agent conversations, and the evaluation harness.
+---
 
+## 🌐 Full-Stack Web Application (Next.js + FastAPI)
+
+The platform includes a production-grade patient portal in `client/` and REST API in `server/`:
+
+### 1. Start the FastAPI Backend Server
 ```bash
-pytest -v
+cd server
+source .venv/bin/activate
+uvicorn app.main:app --reload --port 8000
 ```
+- Interactive API Docs: `http://localhost:8000/docs`
+- Health Probe: `http://localhost:8000/api/health`
 
-All 51 unit and integration tests execute deterministically in under 1.5 seconds without external network dependencies.
+### 2. Start the Next.js Frontend
+```bash
+cd client
+npm run dev
+```
+- Web Application: `http://localhost:3000`
+- AI Chat: `http://localhost:3000/chat`
+- Doctors Directory: `http://localhost:3000/doctors`
+- My Appointments: `http://localhost:3000/appointments`
+- Agent Evaluation Benchmark: `http://localhost:3000/admin/evaluation`

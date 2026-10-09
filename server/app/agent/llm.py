@@ -2,6 +2,7 @@
 
 import os
 import re
+from datetime import datetime
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
@@ -92,7 +93,7 @@ class GeminiLLMClient(LLMClientInterface):
                     tool_res = {"result": tool_res} if tool_res is not None else {"status": "completed"}
                 contents.append(
                     types.Content(
-                        role="tool",
+                        role="user",
                         parts=[types.Part.from_function_response(name=tool_name, response=tool_res)],
                     )
                 )
@@ -152,7 +153,16 @@ class GeminiLLMClient(LLMClientInterface):
                 tool_calls=tool_calls,
             )
         except Exception as e:
-            # Never silently fall back to simulation in production client
+            # Handle 503 Overloaded and 429 Quota Exceeded gracefully
+            error_str = str(e)
+            if "503" in error_str or "UNAVAILABLE" in error_str or "high demand" in error_str:
+                return LLMResult(
+                    text="The AI model is currently experiencing high demand. Please try again in a few moments."
+                )
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "Quota exceeded" in error_str:
+                return LLMResult(
+                    text="The AI API daily quota has been exceeded. Please check your billing details or try again tomorrow."
+                )
             raise RuntimeError(f"Gemini API execution error: {str(e)}") from e
 
 
@@ -176,8 +186,35 @@ def _match_appointments(
     if date:
         candidates = [a for a in candidates if a.get("date") == date]
     if time:
-        candidates = [a for a in candidates if a.get("time") == time]
+        t_clean = time.strip().lower()
+        candidates = [
+            a for a in candidates
+            if a.get("time") == time
+            or str(a.get("time", "")).lower() == t_clean
+            or str(a.get("time", "")).startswith(t_clean)
+            or str(a.get("time", "")).replace(":00", "") == t_clean
+            or str(a.get("time", "")).lstrip("0") == t_clean.lstrip("0")
+        ]
     return candidates
+
+
+def _get_consultation_fee(state: Dict[str, Any]) -> int:
+    """Helper retrieving consultation fee for the current doctor."""
+    if not state:
+        return 500
+    fee = state.get("consultation_fee")
+    if fee:
+        return fee
+    doc_id = state.get("doctor_id")
+    doc_name = (state.get("doctor_name") or "").lower()
+    from app.agent.agent import DOCTORS_DIRECTORY
+    for entry in DOCTORS_DIRECTORY:
+        did = entry[0]
+        dname = entry[1].lower()
+        if (doc_id and did == doc_id) or (doc_name and (doc_name in dname or dname in doc_name)):
+            if len(entry) >= 6:
+                return entry[5]
+    return 500
 
 
 class DeterministicSimulationLLMClient(LLMClientInterface):
@@ -221,14 +258,72 @@ class DeterministicSimulationLLMClient(LLMClientInterface):
             # Predictable Tool Result Synthesis for Test Fixtures
             if tool_name == "search_doctors":
                 docs = tool_res.get("doctors", [])
+                from app.agent.parsers import is_consultation_fee_inquiry, extract_doctor_name
+                is_fee_query = is_consultation_fee_inquiry(last_user_msg)
+                doc_name_in_query = extract_doctor_name(last_user_msg)
+
+                if is_fee_query:
+                    matched_d = None
+                    if docs:
+                        if doc_name_in_query or len(docs) == 1:
+                            matched_d = docs[0]
+                            if doc_name_in_query:
+                                q_clean = doc_name_in_query.lower().replace("dr.", "").replace("dr ", "").strip()
+                                for d in docs:
+                                    if q_clean in d['name'].lower():
+                                        matched_d = d
+                                        break
+                    elif doc_name_in_query:
+                        # Fallback lookup in DOCTORS_DIRECTORY
+                        q_clean = doc_name_in_query.lower().replace("dr.", "").replace("dr ", "").strip()
+                        from app.agent.agent import DOCTORS_DIRECTORY
+                        for entry in DOCTORS_DIRECTORY:
+                            if q_clean in entry[1].lower():
+                                matched_d = {
+                                    "name": entry[1],
+                                    "specialty": entry[2],
+                                    "location": entry[3],
+                                    "consultation_fee": entry[5] if len(entry) >= 6 else 500,
+                                }
+                                break
+
+                    if matched_d:
+                        fee = matched_d.get("consultation_fee", 500)
+                        return LLMResult(
+                            text=f"The consultation fee for {matched_d['name']} ({matched_d['specialty']} in {matched_d['location']}) is ₹{fee}. Would you like to check available appointment slots?"
+                        )
+                    elif docs:
+                        fee_lines = [
+                            f"• {d['name']} ({d['specialty']} in {d['location']}): ₹{d.get('consultation_fee', 500)}"
+                            for d in docs
+                        ]
+                        return LLMResult(
+                            text="Here are the consultation fees for our doctors:\n"
+                            + "\n".join(fee_lines)
+                            + "\n\nWould you like to book an appointment with any of these doctors?"
+                        )
+                    else:
+                        target = doc_name_in_query or state.get("doctor_name") or "that doctor"
+                        return LLMResult(
+                            text=f"I couldn't find consultation fee details for {target}. Would you like to check our available doctors?"
+                        )
+
                 if not docs:
+                    spec = state.get("specialty") or extract_specialty(last_user_msg)
                     loc = state.get("location")
                     loc_suffix = f" in {loc}" if loc else ""
+                    if spec:
+                        return LLMResult(
+                            text=f"I'm sorry, but we don't currently have any doctors matching that specialty{loc_suffix}. Our clinics are currently located in Pune and Mumbai. Would you like to check Pune or Mumbai?"
+                        )
                     return LLMResult(
-                        text=f"I'm sorry, but we don't currently have any doctors matching that specialty{loc_suffix}. Our clinics are currently located in Pune and Mumbai. Would you like to check Pune or Mumbai?"
+                        text=f"I'm sorry, but no doctors were found matching your request{loc_suffix}. Our clinics are currently located in Pune and Mumbai. Would you like to check Pune or Mumbai?"
                     )
-                doc_strs = [f"{d['name']} ({d['specialty']} in {d['location']}, ID: {d['id']})" for d in docs]
-                
+                doc_strs = [
+                    f"{d['name']} ({d['specialty']} in {d['location']}" +
+                    (f", Rating: {d['average_rating']:.1f}/5 from {d['total_reviews']} reviews" if d.get('average_rating') else ", New Doctor") + ")"
+                    for d in docs
+                ]                
                 # If multiple doctors in different regions or location wasn't specified, ask for patient's preferred region/city
                 if len(docs) > 1 or not state.get("location"):
                     cities = sorted(list({d['location'] for d in docs if d.get('location')}))
@@ -248,9 +343,9 @@ class DeterministicSimulationLLMClient(LLMClientInterface):
                     return LLMResult(text="I apologize, but our appointment availability system is currently encountering technical difficulties. Please try again in a few minutes.")
                 slots = tool_res.get("slots", [])
                 date = tool_res.get("date", "")
-                doc_label = state.get("doctor_name") or f"Doctor #{state.get('doctor_id', '')}"
+                doc_label = state.get("doctor_name") or "the doctor"
                 if not slots:
-                    cur_d = state.get("current_date") or "2026-10-05"
+                    cur_d = state.get("current_date") or datetime.now().strftime("%Y-%m-%d")
                     if date == cur_d:
                         return LLMResult(text=f"I checked {doc_label}'s schedule for today ({date}), but all appointment slots for today have already passed. Would you like to check tomorrow's openings?")
                     return LLMResult(text=f"I checked {doc_label}'s schedule for {date}, but there are no available appointment slots on that date. Would you like to check another date?")
@@ -260,10 +355,13 @@ class DeterministicSimulationLLMClient(LLMClientInterface):
                 req_time = state.get("time")
                 if req_time:
                     if req_time in times:
-                        return LLMResult(text=f"I have you down for {doc_label} on {date} at {req_time}. Would you like me to confirm and book this appointment?")
+                        fee = _get_consultation_fee(state)
+                        fee_clause = f" The consultation fee is ₹{fee}." if fee else ""
+                        return LLMResult(text=f"I have you down for {doc_label} on {date} at {req_time}.{fee_clause} Would you like me to confirm and book this appointment?")
                     else:
                         return LLMResult(text=f"{req_time} isn't currently available for {doc_label} on {date}. Available slots on {date}: {', '.join(times)}. Which time would you prefer?")
-                return LLMResult(text=f"Available slots on {date}: {', '.join(times)}. Which time would you prefer?")
+                doc_suffix = f" for {doc_label}" if doc_label and doc_label != "the doctor" else ""
+                return LLMResult(text=f"Available slots{doc_suffix} on {date}: {', '.join(times)}. Which time would you prefer?")
 
             elif tool_name == "get_patient_appointments":
                 apts = tool_res.get("appointments", [])
@@ -304,9 +402,16 @@ class DeterministicSimulationLLMClient(LLMClientInterface):
 
                 # If patient is in cancellation flow:
                 if state.get("intent") == "CANCEL" or "cancel" in last_user_msg_lower:
-                    # 1. Explicit ID provided in patient message
-                    apt_match = re.search(r"\b(?:apt_?|appointment\s*(?:id)?\s*(?:#|:)?|#)\s*(\d+)\b", last_user_msg_lower)
-                    target_id = int(apt_match.group(1)) if apt_match else None
+                    # 1. Explicit ID provided in patient message, digit string, or state
+                    apt_match = re.search(r"\b(?:apt_?|appointment\s*(?:id)?\s*(?:#|:)?|id\s*[:#]?\s*|#)\s*(\d+)\b", last_user_msg_lower)
+                    target_id = None
+                    if apt_match:
+                        target_id = int(apt_match.group(1))
+                    elif last_user_msg.strip().isdigit():
+                        target_id = int(last_user_msg.strip())
+                    elif state.get("target_appointment_id"):
+                        target_id = int(state.get("target_appointment_id"))
+
                     if target_id and any(str(a.get("id")) == str(target_id) for a in apts):
                         return LLMResult(
                             tool_calls=[
@@ -320,15 +425,46 @@ class DeterministicSimulationLLMClient(LLMClientInterface):
                             ]
                         )
 
+                    # 1b. Ordinal reference (e.g. "the first one", "second one", "1st", "2nd")
+                    ord_match = re.search(r"\b(1st|first|2nd|second|3rd|third)\b", last_user_msg_lower)
+                    if ord_match and len(apts) > 1:
+                        ord_word = ord_match.group(1)
+                        ord_idx = 0 if ord_word in ["1st", "first"] else 1 if ord_word in ["2nd", "second"] else 2
+                        if 0 <= ord_idx < len(apts):
+                            target_apt = apts[ord_idx]
+                            return LLMResult(
+                                tool_calls=[
+                                    LLMToolCall(
+                                        name="cancel_appointment",
+                                        arguments={
+                                            "patient_id": state.get("patient_id", "patient_1"),
+                                            "appointment_id": int(target_apt["id"]),
+                                        },
+                                    )
+                                ]
+                            )
+
                     # 2. Descriptive information provided (doctor, date, time)
-                    has_desc = bool(state.get("doctor_name") or state.get("date") or state.get("time"))
+                    from app.agent.parsers import extract_doctor_name, parse_and_normalize_time, resolve_date_expression
+                    doc_to_match = state.get("doctor_name") or extract_doctor_name(last_user_msg)
+                    if not doc_to_match:
+                        from app.agent.agent import DOCTORS_DIRECTORY
+                        for entry in DOCTORS_DIRECTORY:
+                            if any(k in last_user_msg_lower for k in entry[4]):
+                                doc_to_match = entry[1]
+                                break
+
+                    time_to_match = state.get("time") or parse_and_normalize_time(last_user_msg)
+                    date_to_match = state.get("date") or resolve_date_expression(last_user_msg, current_date=state.get("current_date") or datetime.now().strftime("%Y-%m-%d"))
+
+                    has_desc = bool(doc_to_match or date_to_match or time_to_match)
                     if has_desc:
                         matched = _match_appointments(
                             apts,
-                            doctor_name=state.get("doctor_name"),
+                            doctor_name=doc_to_match,
                             doctor_id=state.get("doctor_id"),
-                            date=state.get("date"),
-                            time=state.get("time"),
+                            date=date_to_match,
+                            time=time_to_match,
                         )
                         if len(matched) == 1:
                             target_apt = matched[0]
@@ -345,12 +481,12 @@ class DeterministicSimulationLLMClient(LLMClientInterface):
                             )
                         elif len(matched) == 0:
                             desc_parts = []
-                            if state.get("doctor_name"):
-                                desc_parts.append(f"with {state.get('doctor_name')}")
-                            if state.get("date"):
-                                desc_parts.append(f"on {state.get('date')}")
-                            if state.get("time"):
-                                desc_parts.append(f"at {state.get('time')}")
+                            if doc_to_match:
+                                desc_parts.append(f"with {doc_to_match}")
+                            if date_to_match:
+                                desc_parts.append(f"on {date_to_match}")
+                            if time_to_match:
+                                desc_parts.append(f"at {time_to_match}")
                             desc_str = " ".join(desc_parts)
                             apt_lines = [f"- {a.get('doctor_name')} on {a.get('date')} at {a.get('time')} (ID: {a.get('id')})" for a in apts]
                             return LLMResult(
@@ -362,7 +498,7 @@ class DeterministicSimulationLLMClient(LLMClientInterface):
                             return LLMResult(
                                 text=f"You have multiple matching appointments:\n"
                                 + "\n".join(apt_lines)
-                                + "\nWhich one would you like to cancel? Please specify the appointment ID."
+                                + "\nWhich one would you like to cancel? Please specify the appointment ID or exact time."
                             )
 
                     # 3. No descriptive information provided (e.g. "Cancel my appointment")
@@ -408,7 +544,9 @@ class DeterministicSimulationLLMClient(LLMClientInterface):
                     apt_id = tool_res.get("appointment_id", "")
                     return LLMResult(text=f"Your appointment has been successfully booked and confirmed! Your confirmation ID is {apt_id}. We look forward to seeing you.")
                 elif tool_res.get("error_code") == "SLOT_ALREADY_BOOKED":
-                    return LLMResult(text="I'm sorry, but that slot was just booked by another patient. Let me check the remaining available slots for you.")
+                    return LLMResult(
+                        text="I'm sorry, but that slot was just booked by another patient. That slot is already booked by someone else, but you can book other slots. Would you like me to check the remaining available slots for you?"
+                    )
                 else:
                     return LLMResult(text=f"Booking could not be completed: {tool_res.get('message')}")
 
@@ -480,8 +618,10 @@ class DeterministicSimulationLLMClient(LLMClientInterface):
             doc_name = state.get("doctor_name") or "the doctor"
             date = state.get("date") or "your requested date"
             time_val = state.get("time") or "your requested time"
+            fee = _get_consultation_fee(state)
+            fee_clause = f" The consultation fee is ₹{fee}." if fee else ""
             return LLMResult(
-                text=f"Just to be certain before reserving: would you like me to confirm and book your appointment with {doc_name} on {date} at {time_val}?"
+                text=f"Just to be certain before reserving: would you like me to confirm and book your appointment with {doc_name} on {date} at {time_val}?{fee_clause}"
             )
 
         # 1. Unavailability override attempt ("don't care if the slot isn't available", "just book it")
@@ -497,26 +637,38 @@ class DeterministicSimulationLLMClient(LLMClientInterface):
                 )
 
         # 3. Cancellation / Reschedule lookup
-        if "cancel" in last_msg_lower:
-            # Check if patient specified an explicit appointment ID (e.g. apt_1, #1, appointment 1)
-            apt_match = re.search(r"\b(?:apt_?|appointment\s*(?:id)?\s*(?:#|:)?|#)\s*(\d+)\b", last_msg_lower)
+        last_asst_msg = next((m.get("content", "") for m in reversed(messages[:-1]) if m.get("role") in ["assistant", "model"]), "")
+        is_cancel_continuation = (
+            state.get("intent") == "CANCEL"
+            and "which appointment would you like to cancel" in last_asst_msg.lower()
+            and not any(w in last_msg_lower for w in ["book", "reschedule", "new appointment", "don't cancel", "dont cancel"])
+        )
+        is_cancel_request = (
+            "cancel" in last_msg_lower
+            or is_cancel_continuation
+        )
+        if is_cancel_request:
+            # Check if patient specified an explicit appointment ID (e.g. apt_1, #1, appointment 1, or bare number when continuing)
+            apt_match = re.search(r"\b(?:apt_?|appointment\s*(?:id)?\s*(?:#|:)?|id\s*[:#]?\s*|#)\s*(\d+)\b", last_msg_lower)
+            target_apt_id = None
             if apt_match:
-                apt_id = int(apt_match.group(1))
-                return LLMResult(
-                    tool_calls=[
-                        LLMToolCall(
-                            name="cancel_appointment",
-                            arguments={"patient_id": state.get("patient_id", "patient_1"), "appointment_id": apt_id},
-                        )
-                    ]
-                )
+                target_apt_id = int(apt_match.group(1))
+            elif last_msg_lower.strip().isdigit() and is_cancel_continuation:
+                target_apt_id = int(last_msg_lower.strip())
+            elif state.get("target_appointment_id"):
+                target_apt_id = int(state.get("target_appointment_id"))
 
-            # Check if descriptive criteria was given (doctor name, date, etc.)
+            # Check if descriptive criteria was given (doctor name, date, time, etc.)
             has_desc = bool(
                 state.get("doctor_name")
                 or state.get("date")
                 or state.get("time")
-                or any(w in last_msg_lower for w in ["sharma", "patel", "mehta", "october", "tomorrow", "today", "at 10"])
+                or is_cancel_continuation
+                or target_apt_id is not None
+                or any(w in last_msg_lower for w in [
+                    "sharma", "patel", "mehta", "mrunal", "joshi", "october",
+                    "tomorrow", "today", "at 10", "at 15", "15:00", "09:00", "first", "second"
+                ])
             )
 
             # Check if the disambiguation learned rule is active
@@ -528,7 +680,7 @@ class DeterministicSimulationLLMClient(LLMClientInterface):
                 or any(r.get("target_failure_type") == "ambiguous_target" for r in learned_rules)
             )
 
-            # If patient provided descriptive criteria OR the learned disambiguation rule is active:
+            # If patient provided descriptive criteria OR the learned disambiguation rule is active OR continuing flow:
             # Retrieve appointments authoritatively first!
             if has_desc or has_disambiguation_rule:
                 return LLMResult(
@@ -597,7 +749,7 @@ class DeterministicSimulationLLMClient(LLMClientInterface):
                     tool_calls=[
                         LLMToolCall(
                             name="get_available_slots",
-                            arguments={"doctor_id": state["doctor_id"], "date": state.get("date") or state.get("current_date", "2026-10-05")},
+                            arguments={"doctor_id": state["doctor_id"], "date": state.get("date") or state.get("current_date") or datetime.now().strftime("%Y-%m-%d")},
                         )
                     ]
                 )
@@ -606,17 +758,32 @@ class DeterministicSimulationLLMClient(LLMClientInterface):
 
         # Parsers
         from app.agent.parsers import resolve_date_expression, parse_and_normalize_time
-        current_date = state.get("current_date", "2026-10-05")
+        current_date = state.get("current_date") or datetime.now().strftime("%Y-%m-%d")
         resolved_date = resolve_date_expression(last_msg, current_date=current_date)
         parsed_time = parse_and_normalize_time(last_msg)
 
         # 7. Patient confirms booking (Strictly check required slots; never invent defaults!)
-        confirm_words = ["yes", "confirm", "sure", "please confirm", "go ahead", "book it", "book that", "please book", "do it"]
-        is_bare_confirm = last_msg_lower.strip() in [
-            "yes", "confirm", "sure", "book it", "book it.", "please confirm",
-            "yes, please confirm", "yes, confirm", "yes book it", "yes book that appointment"
+        confirm_words = [
+            "yes", "confirm", "sure", "please confirm", "go ahead", "book it", "book that",
+            "please book", "do it", "confirm and book", "confirm and book this appointment",
+            "book this appointment", "book appointment", "proceed"
         ]
-        is_confirm = (state.get("confirmation_requested") and any(w in last_msg_lower for w in confirm_words)) or is_bare_confirm
+        is_bare_confirm = (
+            any(w in last_msg_lower for w in ["confirm and book", "please confirm and book", "book this appointment", "confirm this appointment"])
+            or last_msg_lower.strip().rstrip(".!?") in [
+                "yes", "confirm", "sure", "book it", "book it.", "please confirm",
+                "yes, please confirm", "yes, confirm", "yes book it", "yes book that appointment",
+                "yes, please confirm and book this appointment", "please confirm and book this appointment",
+                "confirm and book this appointment", "confirm and book", "confirm & book",
+                "confirm & book appointment", "proceed"
+            ]
+        )
+        has_proposal = bool(state.get("doctor_id") and state.get("date") and state.get("time"))
+        is_confirm = (
+            (state.get("confirmation_requested") and any(w in last_msg_lower for w in confirm_words))
+            or is_bare_confirm
+            or (has_proposal and any(w in last_msg_lower for w in ["confirm", "book it", "please book", "book this appointment", "confirm and book"]))
+        )
 
         # If user is mentioning a time in the sentence and it's not a bare confirmation, slot verification takes priority
         if parsed_time and not is_bare_confirm:
@@ -669,8 +836,10 @@ class DeterministicSimulationLLMClient(LLMClientInterface):
             # Check if available slots are already known for this doctor and date
             if avail is not None:
                 if parsed_time in avail:
+                    fee = _get_consultation_fee(state)
+                    fee_clause = f" The consultation fee is ₹{fee}." if fee else ""
                     return LLMResult(
-                        text=f"I have you down for {doc_name} on {date} at {parsed_time}. Would you like me to confirm and book this appointment?"
+                        text=f"I have you down for {doc_name} on {date} at {parsed_time}.{fee_clause} Would you like me to confirm and book this appointment?"
                     )
                 else:
                     # User requested an unavailable slot: Reject hallucination!
@@ -719,7 +888,46 @@ class DeterministicSimulationLLMClient(LLMClientInterface):
 
         # 11. Date provided -> query slots or search doctor
         if resolved_date:
+            from app.agent.parsers import extract_doctor_name
             doc_id = state.get("doctor_id")
+            doc_in_msg = extract_doctor_name(last_user_msg)
+            if not doc_id and doc_in_msg:
+                from app.agent.agent import DOCTORS_DIRECTORY
+                d_low = doc_in_msg.lower()
+                for entry in DOCTORS_DIRECTORY:
+                    if d_low in entry[1].lower():
+                        doc_id = entry[0]
+                        break
+
+            is_slot_request = any(w in last_msg_lower for w in ["slot", "slots", "availability", "schedule", "openings", "opening"])
+
+            if is_slot_request:
+                if doc_id:
+                    return LLMResult(
+                        tool_calls=[
+                            LLMToolCall(
+                                name="get_available_slots",
+                                arguments={"doctor_id": doc_id, "date": resolved_date},
+                            )
+                        ]
+                    )
+                else:
+                    spec = extract_specialty(last_user_msg)
+                    if spec:
+                        return LLMResult(
+                            tool_calls=[
+                                LLMToolCall(
+                                    name="search_doctors",
+                                    arguments={"specialty": spec, "location": state.get("location")},
+                                )
+                            ]
+                        )
+                    # No doctor or specialty chosen yet for slots query
+                    day_label = "tomorrow" if "tomorrow" in last_msg_lower else f"on {resolved_date}"
+                    return LLMResult(
+                        text=f"Sure! To check available appointment slots for {day_label} ({resolved_date}), which doctor or medical specialty would you like to see (such as Dr. Sharma in Dermatology, Dr. Patel in Cardiology, or Dr. Sneha Kulkarni in Neurology)?"
+                    )
+
             if not doc_id:
                 spec = extract_specialty(last_user_msg) or state.get("specialty")
                 loc = state.get("location")
@@ -744,6 +952,28 @@ class DeterministicSimulationLLMClient(LLMClientInterface):
                 ]
             )
 
+        # Fee inquiry intent
+        from app.agent.parsers import is_consultation_fee_inquiry, extract_doctor_name
+        is_fee_query = is_consultation_fee_inquiry(last_user_msg)
+        doc_name_in_query = extract_doctor_name(last_user_msg) or state.get("doctor_name")
+
+        if is_fee_query:
+            fee_args: Dict[str, Any] = {}
+            if doc_name_in_query:
+                fee_args["doctor_name"] = doc_name_in_query
+            else:
+                spec = extract_specialty(last_user_msg)
+                if spec:
+                    fee_args["specialty"] = spec
+            return LLMResult(
+                tool_calls=[
+                    LLMToolCall(
+                        name="search_doctors",
+                        arguments=fee_args,
+                    )
+                ]
+            )
+
         # 12. Doctor search intent (Only when time/slots/date are not already handled)
         is_broad = is_broad_doctor_search(last_user_msg)
         if is_broad:
@@ -754,8 +984,9 @@ class DeterministicSimulationLLMClient(LLMClientInterface):
         is_search_intent = (
             is_broad
             or spec is not None
+            or doc_name_in_query is not None
             or any(word in last_msg_lower for word in [
-                "doctor", "sharma", "patel", "mehta", "skin", "heart",
+                "doctor", "sharma", "patel", "mehta", "mrunal", "joshi", "skin", "heart",
                 "pune", "mumbai", "bangalore", "banglore", "delhi", "region", "city"
             ])
             or (state.get("location") and not state.get("doctor_id"))
@@ -764,11 +995,14 @@ class DeterministicSimulationLLMClient(LLMClientInterface):
         if is_search_intent:
             specialty = spec
             location = state.get("location") if not is_broad or any(c in last_msg_lower for c in ["pune", "mumbai", "bangalore", "delhi"]) else None
+            args: Dict[str, Any] = {"specialty": specialty, "location": location}
+            if doc_name_in_query and not is_broad:
+                args["doctor_name"] = doc_name_in_query
             return LLMResult(
                 tool_calls=[
                     LLMToolCall(
                         name="search_doctors",
-                        arguments={"specialty": specialty, "location": location},
+                        arguments=args,
                     )
                 ]
             )

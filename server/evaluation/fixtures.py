@@ -8,8 +8,11 @@ from app.models import AppointmentModel, AvailabilityModel, DoctorModel
 
 
 def reset_eval_db() -> None:
-    """Drops all tables, recreates schema, and seeds default doctors and slots."""
-    reset_db()
+    """Resets appointments and restores availability slots for evaluation without dropping user accounts."""
+    with SessionLocal() as session:
+        session.query(AppointmentModel).delete()
+        session.query(AvailabilityModel).update({"status": "AVAILABLE"})
+        session.commit()
     seed_db()
 
 

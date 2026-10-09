@@ -42,8 +42,9 @@ class ClinicService:
         self,
         specialty: Optional[str] = None,
         location: Optional[str] = None,
+        name: Optional[str] = None,
     ) -> List[DoctorSchema]:
-        """Search available clinic doctors by specialty and/or city."""
+        """Search available clinic doctors by specialty, city, and/or doctor name."""
         from app.agent.parsers import extract_specialty
         if specialty:
             canonical = extract_specialty(specialty)
@@ -51,7 +52,12 @@ class ClinicService:
                 specialty = canonical
             else:
                 specialty = specialty.strip()
-        return self.repo.search_doctors(specialty=specialty, location=location)
+        return self.repo.search_doctors(specialty=specialty, location=location, name=name)
+
+    def get_doctor_by_id(self, doctor_id: Union[int, str]) -> Optional[DoctorSchema]:
+        """Retrieve a single doctor by integer primary key."""
+        doc_id = self._to_int(doctor_id, "doctor_id")
+        return self.repo.get_doctor_by_id(doctor_id=doc_id)
 
     def get_available_slots(self, doctor_id: Union[int, str], date: str) -> List[AvailabilitySlotSchema]:
         """Get open slots for doctor on date. Supports simulated external service outage."""

@@ -128,3 +128,52 @@ def test_reschedule_appointment(in_memory_db):
     # New slot should now be BOOKED
     new_slot = repo.get_slot(1, "2026-10-10", "15:00")
     assert new_slot.status == "BOOKED"
+
+
+def test_slot_reflection_and_concurrent_race_condition(in_memory_db):
+    """Test:
+    1. Patient books a slot -> reflects in patient appointments & doctor dashboard appointments.
+    2. That slot is no longer visible in get_available_slots to other patients.
+    3. Race condition: concurrent booking attempt by patient 2 returns SLOT_ALREADY_BOOKED with error message.
+    """
+    repo, session = in_memory_db
+    doc_id = 1
+    date = "2026-10-10"
+    time = "10:30"
+
+    # Step 1: Initial available slots include 10:30
+    slots_before = repo.get_available_slots(doc_id, date)
+    assert any(s.time == time for s in slots_before)
+
+    # Step 2: Patient 1 books the slot
+    res1 = repo.book_appointment("pat_alice", doc_id, date, time)
+    assert res1.success is True
+    assert res1.appointment_id is not None
+
+    # Step 3: Slot must NO LONGER be visible in get_available_slots to any patient
+    slots_after = repo.get_available_slots(doc_id, date)
+    assert not any(s.time == time for s in slots_after)
+
+    # Step 4: Reflects in patient's appointments
+    patient_apts = repo.get_patient_appointments("pat_alice")
+    assert len(patient_apts) == 1
+    assert patient_apts[0].date == date
+    assert patient_apts[0].time == time
+
+    # Step 5: Reflects in doctor's appointments panel
+    doc_apts = repo.get_doctor_appointments(doc_id)
+    matched_doc_appt = [a for a in doc_apts if a.date == date and a.time == time]
+    assert len(matched_doc_appt) == 1
+    assert matched_doc_appt[0].patient_id == "pat_alice"
+
+    # Step 6: Patient 2 attempts to book the same slot (race condition / subsequent attempt)
+    res2 = repo.book_appointment("pat_bob", doc_id, date, time)
+    assert res2.success is False
+    assert res2.error_code == "SLOT_ALREADY_BOOKED"
+    assert "already booked" in res2.message.lower() or "just booked" in res2.message.lower()
+    assert "other available slots" in res2.message.lower()
+
+    # Step 7: Patient 2 has 0 appointments booked
+    bob_apts = repo.get_patient_appointments("pat_bob")
+    assert len(bob_apts) == 0
+

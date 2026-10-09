@@ -2,6 +2,7 @@
 
 import re
 from typing import Optional, List, Dict, Any
+from app.schemas.chat import ActivityStep, ConfirmationCard
 
 from app.db import SessionLocal
 from app.repositories import ClinicRepository
@@ -28,14 +29,18 @@ from app.agent.guardrails import (
 )
 
 DOCTORS_DIRECTORY = [
-    (1, "Dr. Sharma", "Dermatology", "Pune", ["sharma"]),
-    (2, "Dr. Patel", "Cardiology", "Pune", ["patel"]),
-    (3, "Dr. Mehta", "Dermatology", "Mumbai", ["mehta"]),
-    (4, "Dr. Ananya Iyer", "Pediatrics", "Pune", ["iyer", "ananya"]),
-    (5, "Dr. Rajesh Verma", "Orthopedics", "Mumbai", ["verma", "rajesh"]),
-    (6, "Dr. Vikram Deshmukh", "General Medicine", "Pune", ["deshmukh", "vikram"]),
-    (7, "Dr. Sneha Kulkarni", "Neurology", "Mumbai", ["kulkarni", "sneha"]),
-    (8, "Dr. Rajiv Joshi", "ENT", "Pune", ["joshi", "rajiv"]),
+    (1, "Dr. Sharma", "Dermatology", "Pune", ["sharma"], 800),
+    (2, "Dr. Patel", "Cardiology", "Pune", ["patel"], 850),
+    (3, "Dr. Mehta", "Dermatology", "Mumbai", ["mehta"], 900),
+    (4, "Dr. Ananya Iyer", "Pediatrics", "Pune", ["iyer", "ananya"], 600),
+    (5, "Dr. Rajesh Verma", "Orthopedics", "Mumbai", ["verma", "rajesh"], 750),
+    (6, "Dr. Vikram Deshmukh", "General Medicine", "Pune", ["deshmukh", "vikram"], 500),
+    (7, "Dr. Sneha Kulkarni", "Neurology", "Mumbai", ["kulkarni", "sneha"], 950),
+    (8, "Dr. Rajiv Joshi", "ENT", "Pune", ["rajiv joshi", "rajiv"], 700),
+    (9, "Dr. Rohan Joshi", "Cardiology", "Koregaon Park, Pune", ["rohan joshi", "rohan"], 850),
+    (10, "Dr. Test Flow", "Pediatrics", "Baner, Pune", ["test flow", "test"], 600),
+    (11, "Dr. Mrunal", "Neurology", "Magarapatta, Pune", ["mrunal"], 1000),
+    (12, "Dr. Sharvari Hupare", "Cardiology", "Bandra West", ["sharvari", "hupare"], 500),
 ]
 
 
@@ -58,36 +63,121 @@ class AgentOrchestrator:
         self.current_date = current_date or def_date
         self.current_time = current_time or def_time
 
-    def _get_service(self) -> ClinicService:
+    def _get_service_session(self) -> tuple[ClinicService, Optional[Any]]:
         if self.service:
-            return self.service
+            return self.service, None
         # Default fresh DB session
         db_session = SessionLocal()
         repo = ClinicRepository(db_session)
-        return ClinicService(repo)
+        return ClinicService(repo), db_session
+
+    def _get_service(self) -> ClinicService:
+        service, _ = self._get_service_session()
+        return service
+
+    # ------------------------------------------------------------------
+    # Activity Steps & Confirmation Card builders
+    # ------------------------------------------------------------------
+
+    _TOOL_ACTIVITY_MAP: Dict[str, tuple] = {
+        "search_doctors": ("search", "Searching doctors"),
+        "get_available_slots": ("calendar", "Checking availability"),
+        "get_patient_appointments": ("list", "Retrieving appointments"),
+        "book_appointment": ("check", "Booking appointment"),
+        "cancel_appointment": ("x-circle", "Cancelling appointment"),
+        "reschedule_appointment": ("refresh-cw", "Rescheduling appointment"),
+    }
+
+    def _build_activity_steps(self, executed_tool_calls: List[Dict[str, Any]]) -> List[ActivityStep]:
+        """Convert raw executed tool call list into safe, UI-friendly activity steps."""
+        steps: List[ActivityStep] = []
+        seen: set = set()
+        for tc in executed_tool_calls:
+            name = tc.get("name", "")
+            if name in seen:
+                continue
+            seen.add(name)
+            icon, label = self._TOOL_ACTIVITY_MAP.get(name, ("loader", name.replace("_", " ").title()))
+            result = tc.get("result", {})
+            done = isinstance(result, dict) and result.get("success", True) is not False
+            steps.append(ActivityStep(icon=icon, label=label, done=done))
+        return steps
+
+    def _build_confirmation_card(
+        self, state: "SessionState", service: ClinicService
+    ) -> Optional[ConfirmationCard]:
+        """Build a pre-booking confirmation card if all required slots are filled."""
+        if not (
+            state.confirmation_requested
+            and state.doctor_id
+            and state.date
+            and state.time
+        ):
+            return None
+        doc = service.get_doctor_by_id(state.doctor_id)
+        if not doc:
+            return None
+        fee = getattr(doc, "consultation_fee", None) or state.consultation_fee
+        if fee is None:
+            fee = 500
+        return ConfirmationCard(
+            doctor=doc.name,
+            specialty=doc.specialty,
+            location=doc.location,
+            date=state.date,
+            time=state.time,
+            doctor_id=state.doctor_id,
+            consultation_fee=fee,
+        )
 
     async def run(
         self,
         patient_id: str,
         message: str,
         session_id: Optional[str] = None,
+        language: Optional[str] = None,
         current_date: Optional[str] = None,
         current_time: Optional[str] = None,
     ) -> ChatResponse:
         """Executes a single conversational turn for a patient."""
-        service = self._get_service()
+        service, db_session = self._get_service_session()
+        try:
+            return await self._run_turn(
+                service=service,
+                patient_id=patient_id,
+                message=message,
+                session_id=session_id,
+                language=language,
+                current_date=current_date,
+                current_time=current_time,
+            )
+        finally:
+            if db_session is not None:
+                db_session.close()
+
+    async def _run_turn(
+        self,
+        service: ClinicService,
+        patient_id: str,
+        message: str,
+        session_id: Optional[str] = None,
+        language: Optional[str] = None,
+        current_date: Optional[str] = None,
+        current_time: Optional[str] = None,
+    ) -> ChatResponse:
         state = self.sessions.get_or_create(patient_id, session_id)
         from app.db.config import get_current_datetime
         def_date, def_time = get_current_datetime()
-        if current_date:
-            state.current_date = current_date
-        elif not state.current_date:
-            state.current_date = self.current_date or def_date
+        state.current_date = current_date or self.current_date or def_date
+        state.current_time = current_time or self.current_time or def_time
 
-        if current_time:
-            state.current_time = current_time
-        elif not state.current_time:
-            state.current_time = self.current_time or def_time
+        # Automatically discard stale dates from past sessions that have already passed
+        if state.date and state.date < state.current_date:
+            state.date = None
+            state.time = None
+            state.available_slots = None
+            state.confirmation_requested = False
+            state.patient_confirmed = False
 
         # Direct input validation: Check for malformed dates/times before routing
         inv_date = detect_invalid_date_expression(message)
@@ -151,6 +241,8 @@ class AgentOrchestrator:
 
         # 2. Compile dynamic system prompt (Base + Learned Rules + Temporal Context)
         system_instruction = compile_system_prompt(current_date=state.current_date)
+        if language:
+            system_instruction += f"\n\nCRITICAL LANGUAGE RULE: The patient has explicitly selected their preferred language as '{language}'. You MUST translate all your thoughts and responses, and generate your FINAL conversational response entirely in {language}. Do not use English unless citing an exact name."
 
         # Build message history for LLM
         formatted_messages = []
@@ -189,11 +281,15 @@ class AgentOrchestrator:
                     tool_calls=[{"name": tc["name"], "args": tc["args"]} for tc in executed_tool_calls] if executed_tool_calls else None,
                     tool_results=[tc["result"] for tc in executed_tool_calls] if executed_tool_calls else None,
                 )
+                activity_steps = self._build_activity_steps(executed_tool_calls)
+                confirmation_card = self._build_confirmation_card(state, service)
                 return ChatResponse(
                     patient_id=patient_id,
                     session_id=state.session_id,
                     response=direct_text,
                     tool_calls=executed_tool_calls,
+                    activity_steps=activity_steps,
+                    confirmation_card=confirmation_card,
                     state=state.to_summary_dict(),
                 )
 
@@ -250,6 +346,7 @@ class AgentOrchestrator:
                         executed_tool_calls.append({"name": tool_name, "args": tool_args, "result": tool_result})
                         
                         # Recover gracefully from disambiguation guardrail by listing active appointments
+                        state.intent = "CANCEL"
                         active_apts = service.get_patient_appointments(patient_id=patient_id, status="CONFIRMED")
                         if active_apts:
                             lines = [f"- Dr. {a.doctor_name.replace('Dr. ', '')} on {a.date} at {a.time} (ID: {a.id})" for a in active_apts]
@@ -275,7 +372,13 @@ class AgentOrchestrator:
                         )
 
                 # Execute domain tool
-                tool_result = execute_tool(tool_name, tool_args, service)
+                tool_result = execute_tool(
+                    tool_name,
+                    tool_args,
+                    service,
+                    current_date=state.current_date,
+                    current_time=state.current_time,
+                )
                 executed_tool_calls.append({"name": tool_name, "args": tool_args, "result": tool_result})
                 state.last_tool_called = tool_name
                 state.last_tool_result = tool_result
@@ -303,11 +406,13 @@ class AgentOrchestrator:
             tool_calls=[{"name": tc["name"], "args": tc["args"]} for tc in executed_tool_calls] if executed_tool_calls else None,
             tool_results=[tc["result"] for tc in executed_tool_calls] if executed_tool_calls else None,
         )
+        activity_steps = self._build_activity_steps(executed_tool_calls)
         return ChatResponse(
             patient_id=patient_id,
             session_id=state.session_id,
             response=fallback_text,
             tool_calls=executed_tool_calls,
+            activity_steps=activity_steps,
             state=state.to_summary_dict(),
         )
 
@@ -315,8 +420,9 @@ class AgentOrchestrator:
         """Progressively extracts clinical slots and intent from user message."""
         text_lower = text.lower()
 
-        # Fresh booking inquiry resets previous booking state
-        if is_vague_booking_request(text):
+        # Fresh booking inquiry resets previous booking state ONLY if not in confirmation or proposed appointment stage
+        has_proposal = bool(state.doctor_id and state.date and state.time)
+        if is_vague_booking_request(text) and not state.confirmation_requested and not has_proposal:
             state.intent = "BOOK"
             state.doctor_id = None
             state.doctor_name = None
@@ -343,28 +449,60 @@ class AgentOrchestrator:
                 if not any(c in text_lower for c in ["pune", "mumbai", "bangalore", "delhi"]):
                     state.location = None
 
+        # Check if continuing active cancellation flow from previous disambiguation
+        last_asst = next((m.content for m in reversed(state.messages[:-1]) if m.role == "assistant"), "")
+        is_cancel_followup = (
+            state.intent == "CANCEL"
+            and "which appointment would you like to cancel" in last_asst.lower()
+            and not any(w in text_lower for w in ["book", "reschedule", "new appointment", "don't cancel", "dont cancel"])
+        )
+
         # Intent
-        if "cancel" in text_lower:
+        if "cancel" in text_lower or is_cancel_followup:
             state.intent = "CANCEL"
             state.confirmation_requested = False
             state.patient_confirmed = False
-            state.target_appointment_id = None
+            if "cancel" in text_lower and not is_cancel_followup:
+                state.target_appointment_id = None
 
-            # Only retain doctor if mentioned in this cancellation turn
-            state.doctor_id = None
-            state.doctor_name = None
-            for did, dname, dspec, dloc, dkeys in DOCTORS_DIRECTORY:
-                if any(k in text_lower for k in dkeys):
-                    state.doctor_id = did
-                    state.doctor_name = dname
-                    break
+            # Retain or parse doctor if mentioned in this cancellation turn
+            parsed_doc = None
+            from app.agent.parsers import extract_doctor_name
+            doc_query_name = extract_doctor_name(text)
+            if doc_query_name:
+                q_lower = doc_query_name.lower().replace("dr.", "").replace("dr", "").strip()
+                for entry in DOCTORS_DIRECTORY:
+                    if q_lower in entry[1].lower():
+                        parsed_doc = entry
+                        break
+            if not parsed_doc:
+                for entry in DOCTORS_DIRECTORY:
+                    did, dname, dspec, dloc, dkeys = entry[0], entry[1], entry[2], entry[3], entry[4]
+                    if any(k in text_lower for k in dkeys):
+                        parsed_doc = entry
+                        break
+            if parsed_doc:
+                state.doctor_id = parsed_doc[0]
+                state.doctor_name = parsed_doc[1]
+                state.specialty = parsed_doc[2]
+                state.location = parsed_doc[3]
+            elif "cancel" in text_lower and not is_cancel_followup:
+                state.doctor_id = None
+                state.doctor_name = None
 
-            state.date = resolve_date_expression(text, current_date=state.current_date)
-            state.time = parse_and_normalize_time(text)
+            parsed_d = resolve_date_expression(text, current_date=state.current_date)
+            if parsed_d:
+                state.date = parsed_d
 
-            apt_match = re.search(r"\b(?:apt_?|appointment\s*(?:id)?\s*(?:#|:)?|#)\s*(\d+)\b", text_lower)
+            parsed_t = parse_and_normalize_time(text)
+            if parsed_t:
+                state.time = parsed_t
+
+            apt_match = re.search(r"\b(?:apt_?|appointment\s*(?:id)?\s*(?:#|:)?|id\s*[:#]?\s*|#)\s*(\d+)\b", text_lower)
             if apt_match:
                 state.target_appointment_id = int(apt_match.group(1))
+            elif text.strip().isdigit() and is_cancel_followup:
+                state.target_appointment_id = int(text.strip())
             return
 
         # Check explicit appointment view / inquiry intent
@@ -382,7 +520,8 @@ class AgentOrchestrator:
         elif "reschedule" in text_lower:
             state.intent = "RESCHEDULE"
         elif any(w in text_lower for w in ["book", "appointment", "doctor", "see a"]):
-            state.intent = "BOOK"
+            if state.intent != "CANCEL":
+                state.intent = "BOOK"
 
         # Specialty
         parsed_spec = extract_specialty(text)
@@ -424,13 +563,34 @@ class AgentOrchestrator:
         new_doc_name = None
         new_spec = None
         new_loc = None
-        for did, dname, dspec, dloc, dkeys in DOCTORS_DIRECTORY:
-            if any(k in text_lower for k in dkeys):
-                new_doc_id = did
-                new_doc_name = dname
-                new_spec = dspec
-                new_loc = dloc
-                break
+        new_fee = None
+
+        from app.agent.parsers import extract_doctor_name
+        doc_query_name = extract_doctor_name(text)
+
+        if doc_query_name:
+            q_lower = doc_query_name.lower().replace("dr.", "").replace("dr ", "").strip()
+            for entry in DOCTORS_DIRECTORY:
+                if q_lower in entry[1].lower():
+                    new_doc_id = entry[0]
+                    new_doc_name = entry[1]
+                    new_spec = entry[2]
+                    new_loc = entry[3]
+                    new_fee = entry[5] if len(entry) >= 6 else 500
+                    break
+
+        if not new_doc_id:
+            sorted_directory = sorted(DOCTORS_DIRECTORY, key=lambda e: max(len(k) for k in e[4]), reverse=True)
+            for entry in sorted_directory:
+                did, dname, dspec, dloc, dkeys = entry[0], entry[1], entry[2], entry[3], entry[4]
+                dfee = entry[5] if len(entry) >= 6 else 500
+                if any(k in text_lower for k in dkeys):
+                    new_doc_id = did
+                    new_doc_name = dname
+                    new_spec = dspec
+                    new_loc = dloc
+                    new_fee = dfee
+                    break
 
         if new_doc_id:
             if state.doctor_id != new_doc_id:
@@ -442,6 +602,8 @@ class AgentOrchestrator:
             state.doctor_name = new_doc_name
             state.specialty = new_spec
             state.location = new_loc
+            if new_fee is not None:
+                state.consultation_fee = new_fee
 
         # Date (resolve relative dates e.g. 'tomorrow' or explicit ISO dates)
         resolved_date = resolve_date_expression(text, current_date=state.current_date)
@@ -505,12 +667,13 @@ class AgentOrchestrator:
             r"\bplease\s+book\b",
             r"\bgo\s+ahead\b",
             r"\bconfirm\b",
+            r"\bconfirm\s+and\s+book\b",
             r"\bthat'?s\s+fine\b",
             r"\bsure\b",
             r"\bdo\s+it\b",
         ]
         is_positive = any(re.search(p, text_lower) for p in confirm_patterns)
-        if is_positive and state.confirmation_requested:
+        if is_positive and (state.confirmation_requested or (state.doctor_id and state.date and state.time)):
             # If user also specifies a time in this turn (e.g. "book Dr. Sharma tomorrow at 1 PM"), that is a new time, not confirmation
             if not resolved_time:
                 state.patient_confirmed = True

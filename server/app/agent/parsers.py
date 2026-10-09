@@ -1,5 +1,6 @@
 """Clinical parsing and normalization utilities for dates, times, and slots."""
 
+import os
 import re
 from datetime import datetime, date as dt_date, timedelta
 from typing import Optional
@@ -85,6 +86,14 @@ def parse_and_normalize_time(text: str) -> Optional[str]:
             hour += 12
         return f"{hour:02d}:00"
 
+    # 4. Phrasing with "at" followed by an hour (e.g. "at 15", "at 14", "at 9", "at 3")
+    match_at_hour = re.search(r"\bat\s+([01]?[0-9]|2[0-3])\b(?!\s*:\s*\d)", text_lower)
+    if match_at_hour:
+        hour = int(match_at_hour.group(1))
+        if 1 <= hour <= 6:
+            hour += 12
+        return f"{hour:02d}:00"
+
     return None
 
 
@@ -102,16 +111,15 @@ def detect_invalid_date_expression(text: str) -> Optional[str]:
     return None
 
 
-def resolve_date_expression(text: str, current_date: str = "2026-10-05") -> Optional[str]:
+def resolve_date_expression(text: str, current_date: Optional[str] = None) -> Optional[str]:
     """Resolves explicit ISO dates or relative date expressions relative to current_date.
     
     Prevents hardcoded assumptions (e.g. assuming tomorrow is always 2026-10-10).
-    Given current_date = '2026-10-05':
-    - 'today' -> '2026-10-05'
-    - 'tomorrow' -> '2026-10-06'
-    - 'day after tomorrow' -> '2026-10-07'
+    Given current_date:
+    - 'today' -> current_date
+    - 'tomorrow' -> current_date + 1 day
+    - 'day after tomorrow' -> current_date + 2 days
     - 'Friday' -> next Friday
-    - '2026-10-10' -> '2026-10-10' (valid calendar date verified)
     """
     if not text:
         return None
@@ -128,10 +136,11 @@ def resolve_date_expression(text: str, current_date: str = "2026-10-05") -> Opti
             # Invalid calendar date (e.g. 2026-99-99)
             return None
 
+    ref_date_str = current_date or os.getenv("CURRENT_DATE", "").strip() or datetime.now().strftime("%Y-%m-%d")
     try:
-        base_dt = datetime.strptime(current_date, "%Y-%m-%d")
+        base_dt = datetime.strptime(ref_date_str, "%Y-%m-%d")
     except Exception:
-        base_dt = datetime(2026, 10, 5)
+        base_dt = datetime.now()
 
     # 2. Natural month-day expressions (e.g., 'October 10', 'Oct 10th', '10th October')
     months_map = {
@@ -350,6 +359,52 @@ def is_booking_intent(text: str) -> bool:
     return False
 
 
+def is_consultation_fee_inquiry(text: str) -> bool:
+    """Detects whether the patient is asking about doctor consultation fees, rates, or pricing."""
+    if not text:
+        return False
+    t = text.lower()
+    fee_patterns = [
+        r"\b(?:consulting|consultation)\s+fees?\b",
+        r"\b(?:fee|fees|cost|costs|charges?|price|pricing|rates?)\b",
+        r"\bhow\s+much\s+(?:is|does|for|to|would)\b",
+        r"\bhow\s+much\b",
+        r"\bwhat\s+(?:is|are)\s+(?:the\s+)?(?:consulting\s+fee|consultation\s+fee|fee|fees|cost|charge|charges)\b",
+    ]
+    return any(re.search(p, t) for p in fee_patterns)
+
+
+def extract_doctor_name(text: str) -> Optional[str]:
+    """Extracts doctor name mentioned in user query (e.g. 'dr. mrunal' -> 'Mrunal', 'dr rohan joshi' -> 'Rohan Joshi')."""
+    if not text:
+        return None
+    # 1. Match 'dr. <name>' or 'dr <name>' or 'doctor <name>'
+    m = re.search(r"\b(?:dr\.?|doctor)\s+([a-zA-Z]+(?:\s+[a-zA-Z]+)?)", text, re.IGNORECASE)
+    if m:
+        cand = m.group(1).strip()
+        stop_words = {
+            "appointment", "appointments", "visit", "available", "fee", "fees",
+            "cost", "costs", "charge", "charges", "today", "tomorrow", "near", "in",
+            "the", "a", "an", "slots", "slot"
+        }
+        words = [w for w in cand.split() if w.lower() not in stop_words]
+        if words:
+            return " ".join(words).title()
+    # 2. Match common doctor surnames or first names directly if mentioned with 'for' or 'with'
+    m2 = re.search(r"\b(?:with|for)\s+([a-zA-Z]+(?:\s+[a-zA-Z]+)?)\b", text, re.IGNORECASE)
+    if m2:
+        cand = m2.group(1).strip()
+        stop_words = {
+            "me", "an", "the", "a", "my", "our", "him", "her", "us", "today", "tomorrow",
+            "appointment", "booking", "visit", "consultation", "checkup"
+        }
+        words = [w for w in cand.split() if w.lower() not in stop_words]
+        if words:
+            if not extract_specialty(" ".join(words)):
+                return " ".join(words).title()
+    return None
+
+
 def is_vague_booking_request(text: str) -> bool:
     """Detects when user initiates a booking intent but has not yet specified any constraints.
     
@@ -357,14 +412,26 @@ def is_vague_booking_request(text: str) -> bool:
     """
     if not is_booking_intent(text):
         return False
-    t = text.lower()
+    if is_consultation_fee_inquiry(text):
+        return False
+    if extract_doctor_name(text):
+        return False
+    t = text.lower().strip()
+    # Confirmation / agreement to book is never a vague new booking inquiry!
+    confirm_markers = [
+        "confirm", "yes", "sure", "go ahead", "book it", "please confirm",
+        "confirm and book", "please book", "do it", "agree", "proceed", "okay",
+        "book this", "book that"
+    ]
+    if any(re.search(r"\b" + re.escape(c) + r"\b", t) for c in confirm_markers):
+        return False
     # If historical doctor lookup is requested, it is not vague
     if any(h in t for h in ["saw last time", "last time", "previous doctor", "seen before", "history"]):
         return False
     # If a specific constraint is already provided, it is not vague
     if extract_specialty(text):
         return False
-    if any(doc in t for doc in ["sharma", "patel", "mehta"]):
+    if any(doc in t for doc in ["sharma", "patel", "mehta", "mrunal", "joshi"]):
         return False
     if any(loc in t for loc in ["pune", "mumbai", "delhi", "bangalore", "banglore"]):
         return False
@@ -390,10 +457,17 @@ def is_broad_doctor_search(text: str) -> bool:
     """
     if not text:
         return False
+    if is_consultation_fee_inquiry(text):
+        return False
+    if extract_doctor_name(text):
+        return False
     if extract_specialty(text):
         return False
     t = text.lower()
-    if any(doc in t for doc in ["sharma", "patel", "mehta"]):
+    if any(doc in t for doc in ["sharma", "patel", "mehta", "mrunal", "joshi"]):
+        return False
+    # Slot/timing inquiries are not broad doctor catalog searches
+    if any(w in t for w in ["slot", "slots", "availability", "schedule", "opening", "openings", "timing", "timings"]):
         return False
 
     # Open-ended inquiry verbs + doctors

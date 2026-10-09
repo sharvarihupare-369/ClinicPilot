@@ -20,7 +20,13 @@ def agent_fixture():
     repo.seed_default_clinic_data()
     service = ClinicService(repo)
     sessions = SessionStore()
-    agent = AgentOrchestrator(clinic_service=service, session_store=sessions)
+    # Pin to a deterministic date so date-relative tests ("Tomorrow", "next week") are stable.
+    agent = AgentOrchestrator(
+        clinic_service=service,
+        session_store=sessions,
+        current_date="2026-10-05",
+        current_time="09:00",
+    )
 
     yield agent, repo, session
 
@@ -38,8 +44,8 @@ async def test_agent_multi_turn_booking_flow(agent_fixture):
     assert len(t1.tool_calls) == 1
     assert t1.tool_calls[0]["name"] == "search_doctors"
 
-    # Turn 2: Provide date
-    t2 = await agent.run(patient_id="pat_101", message="Tomorrow")
+    # Turn 2: Provide explicit date (not 'Tomorrow' to avoid time-dependency)
+    t2 = await agent.run(patient_id="pat_101", message="2026-10-06")
     assert "Available slots" in t2.response
     assert len(t2.tool_calls) == 1
     assert t2.tool_calls[0]["name"] == "get_available_slots"
@@ -336,6 +342,73 @@ async def test_cancellation_disambiguation_recovery(agent_fixture):
     assert "Dr. Sharma" in res.response or "Sharma" in res.response
     assert "Dr. Patel" in res.response or "Patel" in res.response
 
+    # Turn 2: Patient answers with doctor and time without saying "cancel"
+    res_turn2 = await agent.run(
+        patient_id="pat_multi_cancel",
+        message="Dr.Patel at 09",
+        session_id=res.session_id,
+    )
+    assert "successfully cancelled" in res_turn2.response.lower()
+    assert any(
+        tc["name"] == "cancel_appointment" and tc["args"]["appointment_id"] == res2.appointment_id
+        for tc in res_turn2.tool_calls
+    )
+
+    # Verify apt2 is cancelled and apt1 is still confirmed
+    apts = repo.get_patient_appointments("pat_multi_cancel", status=None)
+    assert any(a.id == res2.appointment_id and a.status == "CANCELLED" for a in apts)
+    assert any(a.id == res1.appointment_id and a.status == "CONFIRMED" for a in apts)
+
+
+@pytest.mark.anyio
+async def test_cancellation_disambiguation_with_bare_id(agent_fixture):
+    """Test: When disambiguating multiple appointments, patient responding with bare ID cancels correctly."""
+    agent, repo, _ = agent_fixture
+
+    res1 = repo.book_appointment("pat_bare_id", doctor_id=1, date="2026-10-10", time="10:00")
+    res2 = repo.book_appointment("pat_bare_id", doctor_id=2, date="2026-10-05", time="09:00")
+    assert res1.success and res2.success
+
+    res = await agent.run(patient_id="pat_bare_id", message="Cancel my appointment.")
+    assert "which appointment would you like to cancel" in res.response.lower()
+
+    # Patient responds with bare ID of the second appointment
+    res_turn2 = await agent.run(
+        patient_id="pat_bare_id",
+        message=str(res2.appointment_id),
+        session_id=res.session_id,
+    )
+    assert "successfully cancelled" in res_turn2.response.lower()
+    assert any(
+        tc["name"] == "cancel_appointment" and tc["args"]["appointment_id"] == res2.appointment_id
+        for tc in res_turn2.tool_calls
+    )
+
+
+@pytest.mark.anyio
+async def test_cancellation_disambiguation_with_ordinal(agent_fixture):
+    """Test: When disambiguating multiple appointments, patient responding with 'second one' cancels correctly."""
+    agent, repo, _ = agent_fixture
+
+    res1 = repo.book_appointment("pat_ordinal", doctor_id=1, date="2026-10-10", time="10:00")
+    res2 = repo.book_appointment("pat_ordinal", doctor_id=2, date="2026-10-05", time="09:00")
+    assert res1.success and res2.success
+
+    res = await agent.run(patient_id="pat_ordinal", message="I want to cancel my appointment")
+    assert "which appointment would you like to cancel" in res.response.lower()
+
+    res_turn2 = await agent.run(
+        patient_id="pat_ordinal",
+        message="the second one",
+        session_id=res.session_id,
+    )
+    assert "successfully cancelled" in res_turn2.response.lower()
+    # Chronologically: apt 1 is 2026-10-05 (1st), apt 2 is 2026-10-10 (2nd: res1)
+    assert any(
+        tc["name"] == "cancel_appointment" and tc["args"]["appointment_id"] == res1.appointment_id
+        for tc in res_turn2.tool_calls
+    )
+
 
 @pytest.mark.anyio
 async def test_descriptive_cancellation_resolves_correct_id_not_day_number(agent_fixture):
@@ -624,5 +697,98 @@ async def test_broad_doctor_search_clears_stale_specialty(agent_fixture):
     assert t3.tool_calls[0]["result"]["count"] == 8
 
 
+@pytest.mark.anyio
+async def test_doctor_consultation_fee_inquiry(agent_fixture):
+    """Test: When patient asks for doctor consultation fee, agent directly provides fee and does not ask for region/city."""
+    agent, repo, _ = agent_fixture
+
+    # 1. Ask for Dr. Mrunal's consultation fee
+    r1 = await agent.run(patient_id="pat_fee_1", message="what is consulting fee for dr. mrunal")
+    assert "1000" in r1.response
+    assert "Mrunal" in r1.response
+    assert "Which city or region" not in r1.response
+
+    # 2. Ask for Dr. Rohan Joshi's consultation fee
+    r2 = await agent.run(patient_id="pat_fee_2", message="what is the consulting fee for dr. rohan joshi")
+    assert "850" in r2.response
+    assert "Rohan Joshi" in r2.response
+    assert "Which city or region" not in r2.response
 
 
+@pytest.mark.anyio
+async def test_booking_confirmation_states_consultation_fee(agent_fixture):
+    """Test: When asking patient to confirm booking, agent must state consultation fee in message and confirmation card."""
+    agent, repo, _ = agent_fixture
+
+    # Book with Dr. Sharma on 2026-10-06 at 10:00
+    res = await agent.run(
+        patient_id="pat_confirm_fee",
+        message="I want to book an appointment with Dr. Sharma tomorrow at 10:00"
+    )
+    assert "confirm and book" in res.response.lower()
+    assert "800" in res.response
+    assert res.confirmation_card is not None
+    assert res.confirmation_card.consultation_fee == 800
+    assert "Sharma" in res.confirmation_card.doctor
+
+
+@pytest.mark.anyio
+async def test_slot_inquiry_after_fee_inquiry_checks_slots_for_same_doctor(agent_fixture):
+    """Test: When user asks about doctor fee and then asks for available slots for tomorrow,
+    agent must retain the doctor and check available slots instead of doing a dead-end doctor search.
+    """
+    agent, repo, _ = agent_fixture
+
+    # 1. Ask fee for Dr. Mrunal
+    r1 = await agent.run(patient_id="pat_seq_1", session_id="sess_seq_1", message="what is consulting fee for dr. mrunal")
+    assert "1000" in r1.response
+
+    # 2. Ask for tomorrow's slots
+    r2 = await agent.run(patient_id="pat_seq_1", session_id="sess_seq_1", message="Show available doctor appointment slots for tomorrow")
+    assert "Available slots" in r2.response
+    assert "Mrunal" in r2.response
+    assert len(r2.tool_calls) == 1
+    assert r2.tool_calls[0]["name"] == "get_available_slots"
+    assert "matching that specialty" not in r2.response
+
+
+@pytest.mark.anyio
+async def test_fresh_slots_inquiry_prompts_for_doctor_without_false_negative_error(agent_fixture):
+    """Test: On a fresh session with no doctor selected, asking for tomorrow's slots prompts for doctor/specialty
+    rather than returning an error saying 'we don't currently have any doctors matching that specialty'.
+    """
+    agent, repo, _ = agent_fixture
+
+    res = await agent.run(patient_id="pat_fresh_slots", session_id="sess_fresh", message="Show available doctor appointment slots for tomorrow")
+    assert "matching that specialty" not in res.response
+    assert any(w in res.response.lower() for w in ["which doctor", "specialty", "dermatology", "cardiology"])
+    assert len(res.tool_calls) == 0
+
+
+@pytest.mark.anyio
+async def test_confirm_and_book_button_phrase_completes_booking(agent_fixture):
+    """Test: Clicking the 'Confirm & Book Appointment' button sends
+    'Yes, please confirm and book this appointment' which must complete the booking
+    rather than wiping state and asking which doctor they want.
+    """
+    agent, repo, _ = agent_fixture
+
+    # 1. Propose appointment
+    r1 = await agent.run(
+        patient_id="pat_btn_click",
+        session_id="sess_btn_click",
+        message="I want to book Dr. Sharma tomorrow at 09:00"
+    )
+    assert "confirm and book" in r1.response.lower()
+    assert r1.confirmation_card is not None
+
+    # 2. Click confirm button
+    r2 = await agent.run(
+        patient_id="pat_btn_click",
+        session_id="sess_btn_click",
+        message="Yes, please confirm and book this appointment"
+    )
+    assert "successfully booked and confirmed" in r2.response.lower()
+    assert len(r2.tool_calls) == 1
+    assert r2.tool_calls[0]["name"] == "book_appointment"
+    assert "Which specialty or doctor would you like to see" not in r2.response

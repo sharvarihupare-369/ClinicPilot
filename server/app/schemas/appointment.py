@@ -7,6 +7,8 @@ from pydantic import BaseModel
 class AppointmentSchema(BaseModel):
     id: int
     patient_id: str
+    patient_name: Optional[str] = None
+    patient_phone: Optional[str] = None
     doctor_id: int
     doctor_name: Optional[str] = None
     specialty: Optional[str] = None
@@ -14,7 +16,9 @@ class AppointmentSchema(BaseModel):
     date: str
     time: str
     status: str
+    consultation_fee: Optional[int] = None
     created_at: str
+    has_reviewed_doctor: Optional[bool] = False
 
 
 class BookingResult(BaseModel):

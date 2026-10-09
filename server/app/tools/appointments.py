@@ -43,6 +43,8 @@ def book_appointment(
     doctor_id: Union[int, str],
     date: str,
     time: str,
+    current_date: str = None,
+    current_time: str = None,
 ) -> Dict[str, Any]:
     """Authoritative booking tool. Reserves slot and creates appointment record."""
     if not patient_id or not str(patient_id).strip():
@@ -59,7 +61,10 @@ def book_appointment(
 
 
     from app.db.config import get_current_datetime
-    cur_date, cur_time = get_current_datetime()
+    if current_date and current_time:
+        cur_date, cur_time = current_date, current_time
+    else:
+        cur_date, cur_time = get_current_datetime()
     date_clean = str(date).strip()
     time_clean = str(time).strip()
     if date_clean < cur_date or (date_clean == cur_date and time_clean <= cur_time):
@@ -103,6 +108,8 @@ def reschedule_appointment(
     appointment_id: Union[int, str],
     new_date: str,
     new_time: str,
+    current_date: str = None,
+    current_time: str = None,
 ) -> Dict[str, Any]:
     """Authoritative rescheduling tool. Releases old slot and books new slot atomically."""
     if not patient_id or not str(patient_id).strip():
@@ -118,7 +125,10 @@ def reschedule_appointment(
         return {"success": False, "error_code": "INVALID_TIME_FORMAT", "message": "new_time must be in HH:MM format."}
 
     from app.db.config import get_current_datetime
-    cur_date, cur_time = get_current_datetime()
+    if current_date and current_time:
+        cur_date, cur_time = current_date, current_time
+    else:
+        cur_date, cur_time = get_current_datetime()
     new_date_clean = str(new_date).strip()
     new_time_clean = str(new_time).strip()
     if new_date_clean < cur_date or (new_date_clean == cur_date and new_time_clean <= cur_time):

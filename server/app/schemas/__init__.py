@@ -8,7 +8,7 @@ from app.schemas.appointment import (
     CancellationResult,
     RescheduleResult,
 )
-from app.schemas.chat import ChatRequest, ChatResponse
+from app.schemas.chat import ChatRequest, ChatResponse, ActivityStep, ConfirmationCard
 
 __all__ = [
     "DoctorSchema",
@@ -19,4 +19,6 @@ __all__ = [
     "RescheduleResult",
     "ChatRequest",
     "ChatResponse",
+    "ActivityStep",
+    "ConfirmationCard",
 ]

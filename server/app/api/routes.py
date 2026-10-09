@@ -20,6 +20,7 @@ async def chat(
         patient_id=request.patient_id,
         message=request.message,
         session_id=request.session_id,
+        language=request.language,
     )
 
 

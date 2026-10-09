@@ -1,6 +1,7 @@
 """Multi-turn conversation session state management."""
 
 import uuid
+from datetime import datetime
 from typing import Optional, Dict, Any, List, Union
 from pydantic import BaseModel, Field
 
@@ -23,11 +24,12 @@ class SessionState(BaseModel):
     location: Optional[str] = None
     doctor_id: Optional[int] = None
     doctor_name: Optional[str] = None
+    consultation_fee: Optional[int] = None
     date: Optional[str] = None
     time: Optional[str] = None
     target_appointment_id: Optional[Union[int, str]] = None
 
-    current_date: str = "2026-10-05"
+    current_date: str = Field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d"))
     current_time: str = ""
 
     # Confirmation safety flags
