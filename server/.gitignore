@@ -30,3 +30,4 @@ htmlcov/
 .env.*
 
 Implementation_plan.md
+.vercel
