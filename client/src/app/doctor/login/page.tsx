@@ -37,11 +37,11 @@ export default function DoctorLoginPage() {
       } else {
         router.push("/");
       }
-    } catch (err: unknown) {
-      if (err instanceof Error) {
-        setError(err.message);
-      } else {
+    } catch (err: any) {
+      if (err.response?.status === 401 || err.response?.status === 404) {
         setError("Invalid email or password. Please verify your credentials.");
+      } else {
+        setError(err.response?.data?.detail || err.response?.data?.message || err.message || "Sign in failed.");
       }
     } finally {
       setIsLoading(false);

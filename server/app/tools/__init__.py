@@ -58,6 +58,7 @@ def execute_tool(
             doctor_id=args.get("doctor_id", ""),
             date=args.get("date", ""),
             time=args.get("time", ""),
+            patient_name=args.get("patient_name"),
             current_date=current_date,
             current_time=current_time,
         ),

@@ -43,6 +43,7 @@ def book_appointment(
     doctor_id: Union[int, str],
     date: str,
     time: str,
+    patient_name: Optional[str] = None,
     current_date: str = None,
     current_time: str = None,
 ) -> Dict[str, Any]:
@@ -79,6 +80,7 @@ def book_appointment(
         doctor_id=doctor_id,
         date=date_clean,
         time=time_clean,
+        patient_name=patient_name,
     )
 
     return result.model_dump()
@@ -189,8 +191,12 @@ BOOK_APPOINTMENT_DEFINITION = {
                 "type": "string",
                 "description": "Appointment time in HH:MM format (24-hour).",
             },
+            "patient_name": {
+                "type": "string",
+                "description": "The full name of the patient. If you do not know the patient's name, you must ask them for it before booking.",
+            },
         },
-        "required": ["patient_id", "doctor_id", "date", "time"],
+        "required": ["patient_id", "doctor_id", "date", "time", "patient_name"],
     },
 }
 

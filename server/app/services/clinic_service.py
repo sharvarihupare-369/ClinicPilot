@@ -81,6 +81,7 @@ class ClinicService:
         doctor_id: Union[int, str],
         date: str,
         time: str,
+        patient_name: Optional[str] = None,
     ) -> BookingResult:
         """Attempt authoritative booking with transactional integrity."""
         if self.simulate_booking_failure:
@@ -96,6 +97,7 @@ class ClinicService:
             doctor_id=doc_id,
             date=date,
             time=time,
+            patient_name=patient_name,
         )
 
     def cancel_appointment(

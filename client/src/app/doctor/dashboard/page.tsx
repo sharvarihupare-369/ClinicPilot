@@ -867,13 +867,11 @@ export default function DoctorDashboardPage() {
                         </td>
                         <td className="py-3.5 px-4 font-medium text-slate-900 dark:text-white">
                           <div className="font-semibold text-slate-900 dark:text-white">
-                            {appt.patient_name || appt.patient_id}
+                            {appt.patient_name || "Guest Patient"}
                           </div>
-                          {appt.patient_name && (
-                            <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono">
-                              {appt.patient_id} {appt.patient_phone ? `• ${appt.patient_phone}` : ""}
-                            </div>
-                          )}
+                          <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono">
+                            {appt.patient_id} {appt.patient_phone ? `• ${appt.patient_phone}` : ""}
+                          </div>
                         </td>
                         <td className="py-3.5 px-4 font-medium">
                           {appt.date}

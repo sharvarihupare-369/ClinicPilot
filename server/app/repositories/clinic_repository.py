@@ -188,6 +188,7 @@ class ClinicRepository:
         doctor_id: int,
         date: str,
         time: str,
+        patient_name: Optional[str] = None,
     ) -> BookingResult:
         """Atomically book a slot and create confirmed appointment with autoincremented ID and concurrency locking."""
         doctor = self.session.get(DoctorModel, doctor_id)
@@ -262,17 +263,19 @@ class ClinicRepository:
         )
         patient_obj = self.session.scalars(pat_query).first()
         patient_ref_id = patient_obj.id if patient_obj else None
-        patient_name = patient_obj.name if patient_obj else None
-        patient_phone = patient_obj.phone if patient_obj else None
+        
+        # If a patient_name was passed from the AI, prioritize it if we don't have a db record, or use db record
+        resolved_patient_name = patient_name or (patient_obj.name if patient_obj else None)
+        resolved_patient_phone = patient_obj.phone if patient_obj else None
 
-        if not patient_name and patient_id.startswith("pat_"):
+        if not resolved_patient_name and patient_id.startswith("pat_"):
             try:
                 parts = patient_id.split("_")
                 if len(parts) >= 2 and parts[1].isdigit():
                     user_obj = self.session.get(UserModel, int(parts[1]))
                     if user_obj:
-                        patient_name = user_obj.full_name
-                        patient_phone = user_obj.phone
+                        resolved_patient_name = user_obj.full_name
+                        resolved_patient_phone = user_obj.phone
                         if user_obj.patient_profile:
                             patient_ref_id = user_obj.patient_profile.id
             except Exception:
@@ -284,8 +287,8 @@ class ClinicRepository:
         appointment = AppointmentModel(
             patient_id=patient_id,
             patient_ref_id=patient_ref_id,
-            patient_name=patient_name,
-            patient_phone=patient_phone,
+            patient_name=resolved_patient_name,
+            patient_phone=resolved_patient_phone,
             doctor_id=doctor_id,
             availability_id=slot.id,
             date=date,
